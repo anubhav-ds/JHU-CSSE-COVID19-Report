@@ -1,0 +1,508 @@
+---
+title: "Week 5 - JHU CSSE COVID-19 Data Report"
+author: "Anubhav Sharma"
+date: "22/04/2022"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# COVID19 Report
+
+This report has been made on the basis of the public COVID-19 Data Repository maintained by the Center for Systems Science and Engineering (CSSE) at Johns Hopkins University.
+
+JHU CSSE COVID-19 Data is the is the data repository for the 2019 Novel Coronavirus Visual Dashboard operated by the Johns Hopkins University Center for Systems Science and Engineering (JHU CSSE). Also, Supported by ESRI Living Atlas Team and the Johns Hopkins University Applied Physics Lab (JHU APL).
+
+This huge data set has aggregated various sources of information about COVID19 like WHO, ECDC, US CDC, COVID Tracking Project, WorldoMeters, and many others. JHU CSSE COVID 19 is a data set used by various organizations and governments to monitor and analyse data globally and is licensed for fair use under Creative Commons Attribution 4.0 International. You can find more about this data at this link: https://github.com/CSSEGISandData/COVID-19.
+
+This report focuses on four data sets in the JHU CSSE COVID-19: Global Cases, Global Deaths, US Cases, and US Deaths updated till 21/04/2022. We will tidy the data to suit the need of the further analysis as needed during the report.
+
+Report has 5 Parts:
+
+1. Part 1: Tidying the data
+2. Part 2: Visualizations and Analysis
+3. Part 3: Model
+4. Part 4: Bias Sources
+5. Conclusion
+
+
+## Part 1: Tidying the data
+
+Loading up the libraries required for this report.
+```{r Loading the Libraries}
+library(tidyverse)
+library(lubridate)
+library(ggthemes)
+```
+
+Importing the URLs for the required data sets from COVID-19 Data Repository by the Center for Systems Science and Engineering (CSSE) at Johns Hopkins University.
+```{r Loading the URL of required data in the report}
+url_raw <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+file_names <- c("time_series_covid19_confirmed_US.csv",
+                "time_series_covid19_confirmed_global.csv",
+                "time_series_covid19_deaths_US.csv",
+                "time_series_covid19_deaths_global.csv")
+
+urls <- str_c(url_raw,file_names)
+
+uid_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+```
+
+Reading the data into datasets for further processing.
+```{r Reading the data}
+global_cases <- read_csv(urls[2])
+
+US_cases <- read_csv(urls[1])
+
+US_deaths <- read_csv(urls[3])
+
+global_deaths <- read_csv(urls[4])
+
+uid <- read_csv(uid_url) %>% 
+  select(-c(Lat,Long_, Combined_Key, code3, iso2, iso3, Admin2))
+```
+
+In the next two steps we will focus on the Global Data only. We will tidy up the two data sets and merge them into one dataset "global" while adding the population variable from UID Data set for further analysis in Part 2.
+
+Geo-Location variables has been removed along with others considered not necessary for the ansalysis.
+```{r Tidying up the Global Data}
+global_cases <- global_cases %>%
+  pivot_longer( cols = -c('Province/State', 'Country/Region', 'Lat', 'Long'),
+                names_to = 'date',
+                values_to = 'cases') %>%
+  select(-c(Lat,Long))
+
+global_deaths <- global_deaths %>%
+  pivot_longer( cols = -c('Province/State', 'Country/Region', 'Lat', 'Long'),
+                names_to = 'date',
+                values_to = 'deaths') %>%
+  select(-c(Lat,Long))
+
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = "Country/Region",
+         Province_State = "Province/State") %>%
+  mutate(date = mdy(date)) %>%
+  filter(cases >  0)
+```
+
+Adding the population variable from UID Data set so that US and Global could have similar variables.
+```{r Adding the population variable to combined global dataset}
+global <- global %>%
+  unite("Combined_Key", c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE)
+
+global <- global %>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+```
+
+
+Similar to global data in the following steps will be carried out to combine the US data while removing the variables containing geo-location data and others not considered necessary for the analysis in Part 2.
+```{r Tidying up the US data }
+US_cases <- US_cases %>%
+  pivot_longer(cols = -c(UID:Combined_Key),
+                         names_to = 'date',
+                         values_to = 'cases')
+US_cases <- US_cases %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat,Long_))
+
+US_deaths <- US_deaths %>%
+  pivot_longer(cols = -c(UID:Population),
+               names_to = 'date',
+               values_to = 'deaths') %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat,Long_))
+
+US_total <- US_cases %>%
+  full_join(US_deaths)
+```
+
+US Data set scrictly contains the data from the US as a whole while US_State have state-wise data which we will further use in Part 2 and Part 3.
+```{r Creating "US" and "US_State" Dataset for futher analysis in Part 2 }
+US_state <- US_total %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarise(cases = sum(cases), deaths = sum(deaths), 
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths*1000000/Population) %>%
+  select(Province_State, Country_Region, date, cases, deaths, 
+         deaths_per_mill, Population) %>%
+    ungroup()
+
+US <- US_state %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population))%>%
+  mutate(deaths_per_mill = deaths*1000000/Population) %>%
+  select(Country_Region, date, cases, deaths, deaths_per_mill,
+         Population) %>%
+  ungroup()
+
+US <- US %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths= deaths - lag(deaths))
+
+US_state <- US_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths= deaths - lag(deaths))
+```
+
+## Part 2: Visualizations and Analysis 
+
+We will divide this part into parts with each part having spaces for analysis and visualizations to answer the questions of interest for Global and US data separately.
+
+
+### Analysis Part 1: Global Data
+
+Major questions of interest for the Global Data:
+
+1. What are the Top 10 days when most new cases were recorded by a country during the pandemic?
+2. What are the Top 10 days when most new deaths were recorded by a country during the pandemic?
+3. Which countries recorded highest new deaths during the pandemic?
+4. Which countries have most cases and which countries has most deaths during the pandemic? Are they same or are they totally different countries? If they are different what could be the source of difference which caused expected linear model of more cases leading to more deaths differ?
+5. Further analyzing the point 4 and draw various graphs to understand the finding of point 4.
+
+
+
+Finding Top 10 additions to the cases of countires around the world on a particular day.  
+```{r Finding top 10 days when a country recorded new cases during the period}
+summary(global)
+
+global %>% mutate(new_cases = cases - lag(cases)) %>%
+  top_n(10, wt = new_cases) %>%
+  select(Country_Region, date, new_cases) %>%
+  arrange(desc(new_cases))
+```
+Nine of the top ten additions to the cases belong to US and all of them happeed in the month of January 2022. This corrospond to the reports from other sources as new cases in US and UK did rise a lot during that time due to the recent COVID wave arising from new variant of COVID.
+
+Now we will do a similar analysis to find the top 10 recordings of the addition to the number of deaths from the countries around the world
+
+
+
+```{r Finding top 10 enteries of new deaths by a country during the period}
+global %>% mutate(new_deaths = deaths - lag(deaths)) %>%
+  top_n(10, wt = new_deaths) %>%
+  select(Country_Region, date, new_deaths) %>%
+  arrange(desc(new_deaths))
+```
+Following our previous bias that number of deaths and number of cases fall in a linear model we believed that top 10 additions to the deaths for countries would be similar to the top 10 additions to the cases, but the table above is showing totally different stories.
+
+First of all, US is taking 2 slots in the top 10 this time, and that too happened last year with none of the dates being even close to the dates when US recorded most new cases.
+
+After this, we can see that India takes dominant place here with 5 slots and rest being filled by South American nations like Mexico, Chile, and Ecuador.
+
+This shows that even if the developed nations like the US recorded most cases they are better equipped to prevent deaths of their citizens as compared to the developing nations.
+
+
+Next, we will find the 10 countries with most cases and deaths until 21-04-2022. 
+```{r Top 10 cases and deaths}
+global %>%
+  select(-c("Province_State", "Combined_Key", "date")) %>%
+  group_by(Country_Region) %>%
+  top_n(1, wt = cases) %>%
+  arrange(desc(cases)) %>%
+  filter(!duplicated(Country_Region))
+
+global %>%
+  select(-c("Province_State", "Combined_Key", "date")) %>%
+  group_by(Country_Region) %>%
+  arrange(desc(deaths)) %>%
+  top_n(1, wt =  deaths) %>%
+  filter(!duplicated(Country_Region))
+```
+Just like our previous analysis we could see that while the US and Europe populates the top 10 ranking for most number of cases during the pandemic developing nations of Asia and South America populates the top 10 ranking of most number of deaths recorded by a nation.
+
+This is a clear indication that people living in different countries had different treatments available to them with quality of treatments depending upon the economic prosperity of a nation they were living in.
+
+
+Now we will move to further analyse the difference in cases and deaths between developed nations and developing nations. For this we will consider US and India, both of which fall under top 10 countries with most cases and death.
+```{r COVID19 - India}
+global %>%
+  filter(Country_Region == "India") %>%
+  select(-c(Province_State,Population, Combined_Key)) %>%
+  mutate(cases = cases - lag(cases),
+         deaths = deaths - lag(deaths)) %>%
+  ggplot()+
+  geom_line(aes(x = date, y = cases), color = "blue")+
+  geom_line(aes(x = date, y = deaths), color = "red")+
+  scale_y_log10()+
+  theme_stata()+
+  ggtitle("COVID19 - India (New Cases/Deaths)")+
+  ylab("cases/deaths")
+```
+From the graph above we can see that peaks in cases and deaths came together during the new waves. In third wave there is a spike in the recording of the deaths after the peak possibly because of the delay in collecting and entering the data. But overall, both cases and deaths follow each other in a visible linear relationship in developing country like India.
+
+
+```{r COVID19 - US}
+global %>%
+  filter(Country_Region == "US") %>%
+  select(-c(Province_State,Population, Combined_Key)) %>%
+  mutate(cases = cases - lag(cases),
+         deaths = deaths - lag(deaths)) %>%
+  ggplot()+
+  geom_line(aes(x = date, y = cases), color = "blue")+
+  geom_line(aes(x = date, y = deaths), color = "red")+
+  scale_y_log10()+
+  theme_stata()+
+  ggtitle("COVID19 - US (New Cases/Deaths)")+
+  ylab("cases/deaths")
+```
+
+```{r COVID19 - World (New Cases/Deaths)}
+global %>%
+  select(-c(Province_State,Population, Combined_Key)) %>%
+  mutate(cases = cases - lag(cases),
+         deaths = deaths - lag(deaths)) %>%
+  ggplot()+
+  geom_line(aes(x = date, y = cases), color = "blue")+
+  geom_line(aes(x = date, y = deaths), color = "red")+
+  scale_y_log10()+
+  theme_stata()+
+  ggtitle("COVID19 - World (New Cases/Deaths)")+
+  ylab("cases/deaths")
+```
+
+While it is tempting to consider graphs of US and India as similar: deaths increase when cases increase, we can see that the US graph have suppressed peaks after the first wave. This means that while in India number of deaths generally increase with number of cases with both reaching peaks together in US deaths is relative flat.
+
+This difference can be attributed to the fact that even if whole world face the similar intensity during the first wave the developed countries were able to reduce a great number of deaths with their superior technology and health care, if we compare them to the developing nations which also improved their abilities to deal with the pandemic in later waves but still fell short of reducing number of deaths like developed nations. 
+
+And if we look at graph for the whole world we can see that even though most of the times cases and deaths reach the peaks together the number of deaths actually fell during the last peak of the cases. This is optimistic because it shows that even though the number of cases may reach a new peak world is better equipped to reduce the number of deaths from COVID19 due to the collective efforts of the humanity as a whole.
+
+### Analysis Part 2: US Data
+
+In this section we will analyse the US Data. It contains many workings carried out during the course along with the additional analysis.
+
+Questions of interest for the US Data:
+
+1. What are the top 5 states with most cases and deaths during the pandemic?
+2. Which states fall in top 5 places for the highest number of new deaths and new cases during the pandemic?
+3. Which states have most deaths per millions and cases per millions in the US? Is there a visible linear relationship here and if not, what are the observations?
+4. Graph showing new cases and deaths of US from the Global data set and US data set is similar? And whether state of Washington have different graph as compared to the US as a whole? 
+
+```{r Top 5 states with most cases and deaths during the pandemic}
+US_state %>% 
+  group_by(Province_State) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths)) %>%
+  top_n(5, wt = cases) %>%
+  arrange(desc(cases))
+
+US_state %>% 
+  group_by(Province_State) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths)) %>%
+  top_n(5, wt = deaths) %>%
+  arrange(desc(deaths))
+```
+From this basic analysis we can see that top 5 states in both categories are different with New York recording most deaths when the it had fourth highest cases during the period. This shows that quality of COVID treatment varies across the States even in developed countries like the US.
+
+
+
+```{r Top 5 New Cases and New Deaths during the period}
+US_state %>% 
+  group_by(Province_State) %>%
+  summarize(new_cases = max(new_cases), new_deaths = max(new_deaths)) %>%
+  top_n(5, wt = new_cases) %>%
+  arrange(desc(new_cases))
+
+US_state %>% 
+  group_by(Province_State) %>%
+  summarize(new_cases = max(new_cases), new_deaths = max(new_deaths)) %>%
+  top_n(5, wt = new_deaths) %>%
+  arrange(desc(new_deaths))
+```
+This additional analysis was done to find out about the highest new cases/deaths recorded on a single day across the states. Unlike the previous analysis where mostly same states occupied the top 5 slots here we can see other states like Missouri and Michigan coming in the top 5. Especially Missouri and Tennessee which recorded over 2000 deaths on a single day, around 10% of the maximum new cases recorded during the pandemic.
+
+```{r 10 States with highest number of deaths per millions}
+US_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths_per_mill = max(deaths_per_mill), 
+            cases_per_mill = max(cases/Population*1000000)) %>%
+  top_n(10, deaths_per_mill) %>%
+  arrange(desc(deaths_per_mill))
+
+US_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths_per_mill = max(deaths_per_mill), 
+            cases_per_mill = max(cases/Population*1000000)) %>%
+  top_n(10, cases_per_mill) %>%
+  arrange(desc(cases_per_mill))
+```
+This additional analysis to find more about the states like Mississippi which had highest number of new deaths recorded on a single day. From the above table we could see that while many international media organizations highlighted the New York as most effected city of US it neither have most cases or deaths as per the data.
+
+Lesser known states appears to have faced the most brunt of deaths and cases per millions due to COVID in US. There can be many reasons why States like Utah, which have more cases per million than Mississippi, but have only 1478.497 deaths per million, which pales in front of the 4178.554 deaths per million in Mississippi. Whatever the reasons may be, we can be sure that even in developed nations like US quality of the treatment for COVID varied a lot.
+
+
+```{r COVID19 - US Data Set}
+US %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  ggtitle('COVID19 - US Data Set')+
+  theme_stata()
+```
+
+```{r US Total}
+US %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  ggtitle('COVID19:New Cases/Deaths - US')+
+  ylab("new cases/deaths")+
+  theme_stata()
+```
+
+This analysis was to check if both data set have same data for the US and as we can confirm it after seeing the similar graphs for US new deaths and cases from both of the data sets, this was mainly done to check the integrity of the source data.
+
+
+```{r Washington}
+US_state %>%
+  filter(new_cases > 0, Province_State == "Washington") %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  ggtitle("COVID19:New Cases/Deaths - Washington")+
+  ylab("new cases/deaths")+
+  theme_stata()
+```
+
+State of Washington have similar pattern to the the US total graph with new deaths line appearing as not increasing corresponding to the new cases.
+
+Now, let's see how the state of Mississippi, we found as one of the most affected state in US.
+
+```{r Mississippi}
+US_state %>%
+  filter(new_cases > 0, Province_State == "Mississippi") %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  ggtitle("COVID19:New Cases/Deaths - Mississippi")+
+  ylab("new cases/deaths")+
+  theme_stata()
+```
+Compared to Washington and US total graph, graph of Mississippi is showing more peaks in cases and deaths with more evident linear relationship between new cases and deaths as compared to the previous two graphs. This also shows that while US in general did good job in curbing the deaths after initial wave states like Mississippi were not able to do similar level of job in this regard and essentially produced a graph similar to the graphs produced by the developing countries like India.
+
+## Part 3: Model
+
+In this part we will create a model to predict cases per thousand on the basis of deaths per thousands. This model is similar to the one shown in the course but as we can see from the previous analysis US has done a considerable good job to reduce the linear relationship between cases and deaths due to COVID during the period.
+
+To check whether a linear relationship really changed during the period we will compare two models: US_model_firstwave with only data until 30-06-2021 and US_model with complete data.
+
+```{r Tidying up data for the US_model_2020}
+US_model_firstwave <- US_state %>%
+  group_by(Province_State) %>%
+  filter(date < "2021-07-01")%>%
+  summarize(deaths = max(deaths), cases = max(cases),
+            population = max(Population), cases_per_thou = cases/population*1000,
+            deaths_per_thou = deaths/population*1000) %>%
+  filter(cases>0, population >0)
+```
+
+
+```{r}
+model_firstwave <- lm(cases_per_thou ~ deaths_per_thou, data = US_model_firstwave)
+summary(model_firstwave)
+```
+
+
+```{r Tidying up data for the US_model}
+US_model <- US_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases),
+            population = max(Population), cases_per_thou = cases/population*1000,
+            deaths_per_thou = deaths/population*1000) %>%
+  filter(cases>0, population >0)
+```
+
+```{r Creating the model}
+model <- lm(cases_per_thou ~ deaths_per_thou, data = US_model)
+summary(model)
+```
+We can see from the data that while in the first wave model based on the deaths and cases had a respectable adjusted R Square of 0.5464 and could be considered quite a good fit the model with updated data has adjusted R Square of only 0.3453.
+
+This shows clearly that while in the first wave deaths increased with the cases in the other US was able to eliminate this linear relationship to a great degree. It could be due to the influx of vaccines and better understanding of the COVID in general beside many more variables we can not account for with the data we have.
+
+Now, we will create a prediction on the basis of the two models and compare the graphs resulting from them.
+```{r Adding the prediction coloumns}
+US_state_pred <- US_model %>% mutate(pred_cases =predict(model))
+
+US_firstwave_pred <- US_model_firstwave  %>% mutate(pred_cases =predict(model_firstwave))
+```
+
+```{r Graph for US_model}
+US_state_pred %>% 
+  ggplot()+
+  geom_point(aes(x = deaths_per_thou, y = cases_per_thou), color = "blue")+
+  geom_point(aes(x = deaths_per_thou, y = pred_cases), color = "red")+
+  ggtitle("US_Model")+
+  theme_stata()
+```
+
+```{r Graph for US_model_firstwave}
+US_firstwave_pred %>% 
+  ggplot()+
+  geom_point(aes(x = deaths_per_thou, y = cases_per_thou), color = "blue")+
+  geom_point(aes(x = deaths_per_thou, y = pred_cases), color = "red")+
+  ggtitle("US_model_firstwave")+
+  theme_stata()
+
+```
+
+From the graphs we could see that the graph based on first wave showed more strong relationship between deaths and cases with less number of outliers as compared to the graph based on the model of complete US data. 
+
+US_model shows a very weak linear relationship due to which we can not predict number of cases on the basis of number of deaths with quite a confidence. We should look for other models which could fit the data in a much better way.
+
+***Note: The above finding is not conclusive and may change if data sets from other sources are also included in the analysis.***
+
+
+**Special Note:**
+
+During the report various analysis and visualizations beyond the class have been carried out, especially in the Part 2 and Part 3. 
+
+Examples of such additional analysis are complete separate part for analyzing and visualizing Global Data, finding more about the states with most cases and deaths in US, and comparing models used for predicting number of cases on the basis of deaths based on the complete data until 21-04-2022 and the the data only for the first wave until 30-06-2021.
+
+
+## Part 4: Bias Sources
+
+Bias identification is an important part of any Data Science Project. Below are the Bias Sources identified throughout the whole reporting process:
+
+1. A preconceived bias that there exist a linear relationship between deaths and cases due to COVID19 across the world. This led me to further analyse this aspect across different levels.
+2. A preconceived bias that New York was the most affected city/province in US due to COVID19. This bias originated from the various media reports I obtained in my country which depicted severity of situation in New York specifically.
+3. This report is an extended version of the workings I carried out during a course. While most of the analysis and visualizations in this report are different from the ones in the course this report is based on personal workings I carried out along with the instructor.
+4. Various variables pertaining to identification keys used by other sources and geo-location data has been removed because they were deemed not important for the analysis. Special notes have been included where such filters are used.
+
+## Part 5: Conclusion
+
+JHU CSSE COVID-19 Data is a huge data set which is nothing short of being a standardized global level data set for the COVID19. During our analysis we were able to obtain a lot of interesting findings:
+
+1. While developed countries took most of the spots in Top 10 countries with most number of COVID19 cases the developing countries took most of the spots in Top 10 countries with most number of deaths due to COVID19.
+2. Developing Country like India shows more evidences of the existence of a linear relationship between cases and deaths as compared to the Developed Country like US. Implying that across the different waves of COVID19 developed countries were better equipped in reducing the number of deaths due to COVID19.
+3. That being said, the world as a whole is better equipped in reducing the deaths even when cases are increasing with incremental waves. Even though deveoloped countries have an edge developing countries are progressing to reduce the linear relationship between cases and deaths.
+4. Severity of COVID19 varies across the US with lesser known states bearing the most number of deaths per millions.  This shows that just like difference in quality of treatment available to people on a global scale in US too there exist a difference in quality of treatment available to people across the different States.
+5. There existed a good linear relationship between cases and deaths per thousand in US during the first wave but as time passed on due to the Vaccination Programs and other factors US has eliminated this linear relationship to a commendable level. And same should be true for other developed nations.
+
+All the above conclusions are based on the process followed in the report and are subjected to the the bias sources identified in Part 4. Hence, we must be cautious in accepting these conclusions as they could change if one could use data from other sources and introduces the variables we didn't consider in this report.
+
